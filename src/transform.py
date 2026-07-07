@@ -1,31 +1,47 @@
 import pandas as pd
 
 def filtrar_obras_validas(fact):
-    """
-    Conserva únicamente las obras validas:
-    - Estado A (Admisible) o T (Terminado)
-    - Costo de servicio mayor que 0
-    - Motivo diferente de 16 y 37
-    - EXCLUYE: registros con año de finalización 2025 y estado_hisfact 'ACTIVO'
-    """
 
-    # Reemplazar \N por valores nulos
     fact = fact.replace("\\N", pd.NA)
 
-    # Convertimos la columna a tipo datetime por si viene como texto, 
-    # errors='coerce' transformará lo que no sea fecha en NaT (nulo)
-    fact["fec_finalizac_real"] = pd.to_datetime(fact["fec_finalizac_real"], errors="coerce")
+    fact["fec_finalizac_real"] = pd.to_datetime(
+        fact["fec_finalizac_real"],
+        errors="coerce"
+    )
 
-    # Creamos una máscara para identificar los que SÍ queremos borrar (Año 2025 Y ACTIVO)
-    a_borrar = (fact["fec_finalizac_real"].dt.year == 2025) & (fact["estado_hisfac"] == "ACTIVO")
-
-    # Aplicamos los filtros originales y sumamos la exclusión usando la negación (~)
     fact = fact[
+
         (fact["estado_obra"].isin(["A", "T"])) &
         (fact["total_costo_servicio"] > 0) &
         (~fact["motivo"].isin([16, 37])) &
-        (~a_borrar)  # Conserva todo lo que NO cumpla la condición de borrado
+
+        # Solo universo NUEVO
+        (fact["estado_hisfac"] == "NUEVO") &
+
+        # Excluir finalizados en 2025
+        (
+            fact["fec_finalizac_real"].isna()
+            |
+            (fact["fec_finalizac_real"].dt.year != 2025)
+        )
+
     ].copy()
+
+    return fact
+
+def crear_estado_obra_proceso(fact):
+    """
+    Determina si la obra ya finalizó o continúa en ejecución.
+    """
+
+    fact["fec_finalizac_real"] = pd.to_datetime(
+        fact["fec_finalizac_real"],
+        errors="coerce"
+    )
+
+    fact["estado_obra_proceso"] = fact["fec_finalizac_real"].apply(
+        lambda x: "Obra finalizada" if pd.notna(x) else "En obra"
+    )
 
     return fact
 
@@ -223,6 +239,35 @@ def calcular_fecha_facturacion_correspondiente(fact, calendario):
 
     return fact
 
+def buscar_fecha_facturacion_mes_finalizacion(fec_apto_facturar, sector, calendario):
+
+    if pd.isna(fec_apto_facturar) or pd.isna(sector):
+        return pd.NaT
+
+    fechas = calendario[
+        (calendario["Sector"] == sector) &
+        (calendario["Fecha_Lectura"].dt.year == fec_apto_facturar.year) &
+        (calendario["Fecha_Lectura"].dt.month == fec_apto_facturar.month)
+    ]
+
+    if fechas.empty:
+        return pd.NaT
+
+    return fechas["Fecha_Lectura"].min()
+
+def calcular_fecha_facturacion_mes_finalizacion(fact, calendario):
+
+    fact["fecha_facturacion_mes_finalizacion"] = fact.apply(
+        lambda fila: buscar_fecha_facturacion_mes_finalizacion(
+            fila["fec_apto_facturar"],
+            fila["sector_final"],
+            calendario
+        ),
+        axis=1
+    )
+
+    return fact
+
 def calcular_dias_transcurridos(fact):
 
     fact["fec_finalizac_real"] = pd.to_datetime(
@@ -239,11 +284,16 @@ def calcular_dias_transcurridos(fact):
 
 def crear_estado_facturacion(fact):
 
-    fact["estado"] = fact["dias_transcurridos"].apply(
-        lambda x:
-            "Dentro de fecha"
-            if pd.notna(x) and x <= 45
-            else "Fuera de fecha"
+    fact["estado_facturacion"] = fact.apply(
+        lambda fila:
+            "En obra"
+            if fila["estado_obra_proceso"] == "En obra"
+            else (
+                "Dentro de fecha"
+                if pd.notna(fila["dias_transcurridos"]) and fila["dias_transcurridos"] <= 45
+                else "Fuera de fecha"
+            ),
+        axis=1
     )
 
     return fact
@@ -311,3 +361,221 @@ def calcular_dias_hasta_facturacion(fact):
     ).dt.days
 
     return fact
+
+#ANÁLISIS
+
+def crear_estado(fact):
+
+    estados = []
+
+    for _, fila in fact.iterrows():
+
+        # Sigue en obra
+        if fila["estado_obra_proceso"] == "En obra":
+            estados.append("En obra")
+
+        # Ya terminó la obra
+        else:
+
+            if fila["estado_activacion"] == "Pendiente PUSER":
+                estados.append("Pendiente PUSER")
+
+            elif fila["estado_activacion"] == "Pendiente RUTA":
+                estados.append("Pendiente Ruta")
+
+            elif fila["estado_activacion"] == "Pendiente PUSER y RUTA":
+                estados.append("Pendiente PUSER y Ruta")
+
+            elif fila["estado_activacion"] == "Activo":
+
+                if fila["estado_facturacion"] == "Dentro de fecha":
+                    estados.append("Dentro de fecha")
+                else:
+                    estados.append("Fuera de fecha")
+
+            else:
+                estados.append("Sin clasificar")
+
+    fact["estado"] = estados
+
+    return fact
+
+def crear_causa_raiz(fact):
+
+    causas = []
+
+    for _, fila in fact.iterrows():
+
+        # EN OBRA
+        if fila["estado"] == "En obra":
+            causas.append("Obra en ejecución")
+
+        # PENDIENTES
+        elif fila["estado"] == "Pendiente PUSER":
+            causas.append("Pendiente de registro PUSER")
+
+        elif fila["estado"] == "Pendiente Ruta":
+            causas.append("Pendiente de asignación de Ruta")
+
+        elif fila["estado"] == "Pendiente PUSER y Ruta":
+            causas.append("Pendiente de registro PUSER y asignación de Ruta")
+
+        # DENTRO DE FECHA
+        elif fila["estado"] == "Dentro de fecha":
+            causas.append("Sin observaciones")
+
+        # FUERA DE FECHA
+        elif fila["estado"] == "Fuera de fecha":
+
+            if fila["fec_apto_facturar"] > fila["fecha_facturacion_mes_finalizacion"]:
+
+                causas.append(
+                    "No alcanzó el ciclo de facturación del mes"
+                )
+
+            elif (
+                pd.notna(fila["fec_puser_nextel"])
+                and
+                fila["fec_puser_nextel"] > fila["fecha_facturacion_mes_finalizacion"]
+            ):
+
+                causas.append(
+                    "PUSER registrado después del cierre del ciclo"
+                )
+
+            else:
+
+                causas.append("Otro motivo")
+
+        else:
+
+            causas.append("Sin clasificar")
+
+    fact["causa_raiz"] = causas
+
+    return fact
+
+import os
+import pandas as pd
+
+def calcular_metricas_evolucion():
+
+    # ==============================
+    # Carpeta historial
+    # ==============================
+
+    historial_dir = os.path.join(
+        os.path.dirname(os.path.dirname(__file__)),
+        "historial"
+    )
+
+    archivos = sorted([
+        f for f in os.listdir(historial_dir)
+        if f.endswith(".parquet")
+    ])
+
+    # Si aún no existen dos snapshots
+    if len(archivos) < 2:
+
+        return {
+            "solucionados": 0,
+            "nuevos": 0,
+            "seguimiento": 0,
+            "criticos": 0,
+            "df_solucionados": pd.DataFrame(),
+            "df_nuevos": pd.DataFrame(),
+            "df_seguimiento": pd.DataFrame(),
+            "df_criticos": pd.DataFrame()
+        }
+
+    # ==============================
+    # Leer los dos últimos snapshots
+    # ==============================
+
+    ruta_ayer = os.path.join(historial_dir, archivos[-2])
+    ruta_hoy = os.path.join(historial_dir, archivos[-1])
+
+    df_ayer = pd.read_parquet(ruta_ayer)
+    df_hoy = pd.read_parquet(ruta_hoy)
+
+    # ==============================
+    # Solo fuera de fecha
+    # ==============================
+
+    ayer_fp = df_ayer[
+        df_ayer["estado"] == "Fuera de fecha"
+    ].copy()
+
+    hoy_fp = df_hoy[
+        df_hoy["estado"] == "Fuera de fecha"
+    ].copy()
+
+    llave = "numero_cliente"
+
+    set_ayer = set(ayer_fp[llave])
+    set_hoy = set(hoy_fp[llave])
+
+    # ==============================
+    # KPI 1
+    # Solucionados
+    # ==============================
+
+    solucionados = set_ayer - set_hoy
+
+    df_solucionados = ayer_fp[
+        ayer_fp[llave].isin(solucionados)
+    ]
+
+    # ==============================
+    # KPI 2
+    # Nuevos fuera de fecha
+    # ==============================
+
+    nuevos = set_hoy - set_ayer
+
+    df_nuevos = hoy_fp[
+        hoy_fp[llave].isin(nuevos)
+    ]
+
+    # ==============================
+    # KPI 3
+    # Seguimiento
+    # ==============================
+
+    seguimiento = set_hoy.intersection(set_ayer)
+
+    df_seguimiento = hoy_fp[
+        hoy_fp[llave].isin(seguimiento)
+    ]
+
+    # ==============================
+    # KPI 4
+    # Críticos
+    # ==============================
+
+    df_criticos = hoy_fp[
+        (hoy_fp["dias_hasta_facturacion"] >= 0) &
+        (hoy_fp["dias_hasta_facturacion"] <= 10)
+    ]
+
+    # ==============================
+
+    return {
+
+        "solucionados": len(df_solucionados),
+
+        "nuevos": len(df_nuevos),
+
+        "seguimiento": len(df_seguimiento),
+
+        "criticos": len(df_criticos),
+
+        "df_solucionados": df_solucionados,
+
+        "df_nuevos": df_nuevos,
+
+        "df_seguimiento": df_seguimiento,
+
+        "df_criticos": df_criticos
+
+    }

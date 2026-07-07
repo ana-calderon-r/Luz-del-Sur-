@@ -5,6 +5,7 @@ from extract import cargar_fact_suministros, cargar_calendario
 
 from transform import (
     filtrar_obras_validas,
+    crear_estado_obra_proceso,
     preparar_ruta_facturacion,
     agregar_plazo_legal,
     calcular_fecha_limite,
@@ -17,10 +18,13 @@ from transform import (
     calcular_dias_sin_puser,
     calcular_dias_hasta_facturacion,
     calcular_fec_apto_facturar,
+    calcular_fecha_facturacion_mes_finalizacion,   # NUEVO
     calcular_fecha_facturacion_correspondiente,
     calcular_dias_transcurridos,
     crear_estado_facturacion,
-    asignar_responsable
+    asignar_responsable,
+    crear_estado,
+    crear_causa_raiz
 )
 
 # ==========================
@@ -37,6 +41,8 @@ calendario = preparar_calendario(calendario)
 
 fact = filtrar_obras_validas(fact)
 
+fact = crear_estado_obra_proceso(fact)
+
 # Crear sector_final, zona_final y ruta_final
 fact = preparar_ruta_facturacion(fact)
 
@@ -49,6 +55,7 @@ fact = crear_estado_ruta(fact)
 fact = crear_estado_activacion(fact)
 
 fact = calcular_fec_apto_facturar(fact)
+fact = calcular_fecha_facturacion_mes_finalizacion(fact, calendario)
 fact = calcular_fecha_facturacion_correspondiente(fact, calendario)
 fact = calcular_dias_transcurridos(fact)
 fact = crear_estado_facturacion(fact)
@@ -59,6 +66,8 @@ fact = calcular_dias_sin_puser(fact)
 fact = evaluar_puser(fact)
 
 fact = calcular_dias_hasta_facturacion(fact)
+fact = crear_estado(fact)
+fact = crear_causa_raiz(fact)
 
 # ==========================
 # Mostrar resultados
@@ -68,6 +77,7 @@ print(
     fact[
         [
             "numero_cliente",
+            "estado_obra_proceso",
 
             "sector",
             "sector_cliente",
@@ -87,14 +97,17 @@ print(
             "estado_activacion",
 
             "fec_apto_facturar",
+            "fecha_facturacion_mes_finalizacion",
             "fecha_facturacion_correspondiente",
             "dias_transcurridos",
-            "estado",
+            "estado_facturacion",
 
             "responsable",
             "dias_hasta_puser",
             "estado_puser_plazo",
-            "dias_hasta_facturacion"
+            "dias_hasta_facturacion",
+            "estado",
+            "causa_raiz"
         ]
     ].head(20)
 )
@@ -117,4 +130,32 @@ ruta_salida = os.path.join(
 
 fact.to_excel(ruta_salida, index=False)
 
+# AGREGAR ESTO
+ruta_parquet = os.path.join(OUTPUT_DIR, "fact_suministros_procesado.parquet")
+fact.to_parquet(ruta_parquet, index=False)
+
 print(f"Archivo guardado en: {ruta_salida}")
+
+from datetime import datetime
+
+# ==========================
+# Guardar historial
+# ==========================
+
+HISTORIAL_DIR = os.path.join(
+    os.path.dirname(os.path.dirname(__file__)),
+    "historial"
+)
+
+os.makedirs(HISTORIAL_DIR, exist_ok=True)
+
+timestamp = datetime.now().strftime("%Y-%m-%d")
+
+ruta_snapshot = os.path.join(
+    HISTORIAL_DIR,
+    f"snapshot_{timestamp}.parquet"
+)
+
+fact.to_parquet(ruta_snapshot, index=False)
+
+print(f"Snapshot guardado en: {ruta_snapshot}")
